@@ -1,26 +1,26 @@
 'use strict';
 
-const IOBuffer = require('iobuffer');
+const BinaryReader = require('./BinaryReader');
 const IFD = require('./IFD');
 const IFDValue = require('./IFDValue');
 const TIFF = require('./TIFF');
 
-class TIFFDecoder extends IOBuffer {
+class TIFFDecoder extends BinaryReader {
     constructor(data) {
         super(data);
-        this._decoded = false;
-        this._tiff = null;
-        this._nextIFD = 0;
+        this.decoded = false;
+        this.tiff = null;
+        this.nextIFD = 0;
     }
 
     decode() {
-        if (this._decoded) return this._tiff;
-        this._tiff = new TIFF();
+        if (this.decoded) return this.tiff;
+        this.tiff = new TIFF();
         this.decodeHeader();
-        while (this._nextIFD) {
+        while (this.nextIFD) {
             this.decodeIFD();
         }
-        return this._tiff;
+        return this.tiff;
     }
 
     decodeHeader() {
@@ -41,43 +41,42 @@ class TIFFDecoder extends IOBuffer {
         }
 
         // Offset of the first IFD
-        this._nextIFD = this.readUint32();
+        this.nextIFD = this.readUint32();
     }
 
     decodeIFD() {
-        this.seek(this._nextIFD);
+        this.goto(this.nextIFD);
         var ifd = new IFD();
-        this._tiff.ifd.push(ifd);
+        this.tiff.ifd.push(ifd);
         const numEntries = this.readUint16();
         for (var i = 0; i < numEntries; i++) {
             this.decodeIFDEntry(ifd);
         }
         this.decodeImageData(ifd);
-        this._nextIFD = this.readUint32();
+        this.nextIFD = this.readUint32();
     }
 
     decodeIFDEntry(ifd) {
-        this.mark();
+        let offset = this.offset;
         let tag = this.readUint16();
         let type = this.readUint16();
         let numValues = this.readUint32();
 
         if (type < 1 || type > 12) {
-            this.skip(4); // unknown type, skip this value
+            this.forward(4); // unknown type, skip this value
             return;
         }
 
         let valueByteLength = IFDValue.getByteLength(type, numValues);
         if (valueByteLength > 4) {
-            this.seek(this.readUint32());
+            this.goto(this.readUint32());
         }
 
         var value = IFDValue.readData(this, type, numValues);
         ifd.fields.set(tag, value);
 
-        // go to the next entry
-        this.reset();
-        this.skip(12);
+        // goto offset of next entry
+        this.goto(offset + 12);
     }
 
     decodeImageData(ifd) {
@@ -118,7 +117,9 @@ class TIFFDecoder extends IOBuffer {
             if (bitDepth === 8) {
                 pixel = fill8bit(data, stripData, pixel, length);
             } else if (bitDepth === 16) {
-                pixel = fill16bit(data, stripData, pixel, length, this.isLittleEndian());
+                pixel = fill16bit(data, stripData, pixel, length, this.littleEndian);
+            } else if (bitDepth === 32) {
+                pixel = fill32bit(data, stripData, pixel, length, this.littleEndian);
             } else {
                 unsupported('bitDepth: ', bitDepth);
             }
@@ -130,7 +131,7 @@ class TIFFDecoder extends IOBuffer {
     getStripData(compression, offset, byteCounts) {
         switch (compression) {
             case 1: // No compression
-                return new DataView(this.buffer, offset, byteCounts);
+                return new DataView(this.data.buffer, offset, byteCounts);
                 break;
             case 2: // CCITT Group 3 1-Dimensional Modified Huffman run length encoding
             case 32773: // PackBits compression
@@ -149,6 +150,8 @@ function getDataArray(size, channels, bitDepth) {
         return new Uint8Array(size * channels);
     } else if (bitDepth === 16) {
         return new Uint16Array(size * channels);
+    } else if (bitDepth === 32) {
+        return new Uint32Array(size * channels);
     } else {
         unsupported('bit depth', bitDepth);
     }
@@ -164,6 +167,13 @@ function fill8bit(dataTo, dataFrom, index, length) {
 function fill16bit(dataTo, dataFrom, index, length, littleEndian) {
     for (var i = 0; i < length * 2; i += 2) {
         dataTo[index++] = dataFrom.getUint16(i, littleEndian);
+    }
+    return index;
+}
+
+function fill32bit(dataTo, dataFrom, index, length, littleEndian) {
+    for (var i = 0; i < length * 4; i += 4) {
+        dataTo[index++] = dataFrom.getUint32(i, littleEndian);
     }
     return index;
 }
